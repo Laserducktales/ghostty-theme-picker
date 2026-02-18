@@ -1,0 +1,117 @@
+#!/bin/bash
+# Interactive theme selector - applies to current terminal only
+
+THEME_DIR="/Applications/Ghostty.app/Contents/Resources/ghostty/themes"
+USER_THEME_DIR="$HOME/.config/ghostty/themes"
+
+# --apply mode: called by fzf subshell for live preview
+if [ "$1" = "--apply" ]; then
+    theme_file="$2"
+    [ -z "$theme_file" ] && exit 0
+    hex_to_rgb() { local hex="${1#\#}"; echo "rgb:${hex:0:2}/${hex:2:2}/${hex:4:2}"; }
+    while IFS='=' read -r key value; do
+        key=$(echo "$key" | xargs); value=$(echo "$value" | xargs)
+        case "$key" in
+            background)           printf '\033]11;%s\033\\' "$(hex_to_rgb "$value")" >/dev/tty ;;
+            foreground)           printf '\033]10;%s\033\\' "$(hex_to_rgb "$value")" >/dev/tty ;;
+            cursor-color)         printf '\033]12;%s\033\\' "$(hex_to_rgb "$value")" >/dev/tty ;;
+            selection-background) printf '\033]17;%s\033\\' "$(hex_to_rgb "$value")" >/dev/tty ;;
+            selection-foreground) printf '\033]19;%s\033\\' "$(hex_to_rgb "$value")" >/dev/tty ;;
+            palette)
+                printf '\033]4;%d;%s\033\\' "${value%%=*}" "$(hex_to_rgb "${value#*=}")" >/dev/tty ;;
+        esac
+    done < "$theme_file"
+    exit 0
+fi
+
+hex_to_rgb() {
+    local hex="${1#\#}"
+    echo "rgb:${hex:0:2}/${hex:2:2}/${hex:4:2}"
+}
+
+apply_theme() {
+    local theme_file="$1"
+    while IFS='=' read -r key value; do
+        key=$(echo "$key" | xargs)
+        value=$(echo "$value" | xargs)
+        case "$key" in
+            background)           printf '\033]11;%s\033\\' "$(hex_to_rgb "$value")" ;;
+            foreground)           printf '\033]10;%s\033\\' "$(hex_to_rgb "$value")" ;;
+            cursor-color)         printf '\033]12;%s\033\\' "$(hex_to_rgb "$value")" ;;
+            selection-background) printf '\033]17;%s\033\\' "$(hex_to_rgb "$value")" ;;
+            selection-foreground) printf '\033]19;%s\033\\' "$(hex_to_rgb "$value")" ;;
+            palette)
+                local index="${value%%=*}"
+                local color="${value#*=}"
+                printf '\033]4;%d;%s\033\\' "$index" "$(hex_to_rgb "$color")"
+                ;;
+        esac
+    done < "$theme_file"
+}
+
+find_theme() {
+    local name="$1"
+    if [ -f "$USER_THEME_DIR/$name" ]; then
+        echo "$USER_THEME_DIR/$name"
+    elif [ -f "$THEME_DIR/$name" ]; then
+        echo "$THEME_DIR/$name"
+    fi
+}
+
+is_light_theme() {
+    local theme_file="$1"
+    local bg=$(grep "^background" "$theme_file" 2>/dev/null | head -1 | cut -d'=' -f2 | tr -d ' #')
+    [ -z "$bg" ] && return 1
+    local r=$((16#${bg:0:2}))
+    local g=$((16#${bg:2:2}))
+    local b=$((16#${bg:4:2}))
+    local luminance=$(( (r * 299 + g * 587 + b * 114) / 1000 ))
+    [ "$luminance" -gt 128 ]
+}
+
+build_theme_list() {
+    ghostty +list-themes 2>/dev/null | sed 's/ (resources)//;s/ (user)//' | sort -u | while IFS= read -r theme; do
+        local theme_file=""
+        [ -f "$USER_THEME_DIR/$theme" ] && theme_file="$USER_THEME_DIR/$theme"
+        [ -z "$theme_file" ] && [ -f "$THEME_DIR/$theme" ] && theme_file="$THEME_DIR/$theme"
+
+        if [ -n "$theme_file" ] && is_light_theme "$theme_file"; then
+            echo "[Light] $theme"
+        else
+            echo "[Dark]  $theme"
+        fi
+    done
+}
+
+# Save original theme to restore if user cancels
+ORIGINAL_THEME=$(grep '^theme' ~/.config/ghostty/config 2>/dev/null | tail -1 | cut -d'=' -f2 | xargs)
+
+SCRIPT="$0"
+
+# Select theme with live preview on focus change
+SELECTION=$(build_theme_list | fzf \
+    --prompt="Theme (local): " \
+    --header="Live preview — ESC to restore original" \
+    --preview-window=hidden \
+    --bind "focus:execute-silent(
+        theme=\$(echo {} | sed 's/^\[Light\] //;s/^\[Dark\]  //');
+        f=\"$USER_THEME_DIR/\$theme\";
+        [ ! -f \"\$f\" ] && f=\"$THEME_DIR/\$theme\";
+        [ -f \"\$f\" ] && bash \"$SCRIPT\" --apply \"\$f\"
+    )")
+
+THEME=$(echo "$SELECTION" | sed 's/^\[Light\] //;s/^\[Dark\]  //')
+
+if [ -z "$THEME" ]; then
+    if [ -n "$ORIGINAL_THEME" ]; then
+        orig_file=$(find_theme "$ORIGINAL_THEME")
+        [ -n "$orig_file" ] && apply_theme "$orig_file"
+    fi
+    exit 0
+fi
+
+theme_file=$(find_theme "$THEME")
+[ -z "$theme_file" ] && { echo "Theme '$THEME' not found" >&2; exit 1; }
+
+apply_theme "$theme_file"
+echo "Applied $THEME to current window"
